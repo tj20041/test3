@@ -28,13 +28,25 @@ data = [
 
 invoices_df = spark.createDataFrame(data, schema)
 
-# Calculate total invoice amount across line items
+# Calculate total invoice amount across line items.
+# F.sum() is a row-wise aggregate for scalar columns and cannot operate on
+# ArrayType columns. F.aggregate() is the correct PySpark higher-order
+# function for folding (summing) all elements within an array in a single row.
+# F.coalesce guards against null arrays; the inner F.coalesce guards against
+# null elements within the array, ensuring no NullPointerException at runtime.
 processed_invoices = invoices_df.withColumn(
     "total_invoice_amount",
-    F.sum(F.col("item_amounts"))
+    F.aggregate(
+        F.coalesce(F.col("item_amounts"), F.array().cast(ArrayType(DoubleType()))),
+        F.lit(0.0).cast(DoubleType()),
+        lambda acc, x: acc + F.coalesce(x, F.lit(0.0).cast(DoubleType()))
+    )
 )
 
 # Process invoice dataset
+# NOTE: collect() is used here for small test datasets only.
+# For production use, replace with a write to S3 or Glue Data Catalog, e.g.:
+#   processed_invoices.write.parquet('s3://your-bucket/processed_invoices/')
 processed_invoices.collect()
 
 job.commit()
