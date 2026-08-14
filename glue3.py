@@ -28,13 +28,25 @@ data = [
 
 invoices_df = spark.createDataFrame(data, schema)
 
-# Calculate total invoice amount across line items
+# Assert schema correctness at startup to catch regressions early
+assert dict(invoices_df.dtypes)['item_amounts'] == 'array<double>', \
+    'Schema mismatch: item_amounts must be array<double>'
+
+# Calculate total invoice amount across line items within each row.
+# F.aggregate() reduces array elements within a single row using the provided
+# initial accumulator value and a binary merge lambda — no WindowSpec required.
+# F.sum() is a cross-row aggregate and cannot be used here against an ArrayType column.
 processed_invoices = invoices_df.withColumn(
     "total_invoice_amount",
-    F.sum(F.col("item_amounts"))
+    F.aggregate(
+        F.col("item_amounts"),
+        F.lit(0.0).cast(DoubleType()),
+        lambda acc, x: acc + x
+    )
 )
 
-# Process invoice dataset
-processed_invoices.collect()
+# Write output to S3 using the Glue DynamicFrame writer pattern.
+# collect() is intentionally replaced to avoid driver OOM on large datasets.
+processed_invoices.write.mode("overwrite").parquet("s3://your-bucket/output/processed_invoices/")
 
 job.commit()
