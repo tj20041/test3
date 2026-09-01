@@ -28,11 +28,28 @@ data = [
 
 invoices_df = spark.createDataFrame(data, schema)
 
-# Calculate total invoice amount across line items
+# Defensive guard: ensure item_amounts is the expected array type before transforming
+assert dict(invoices_df.dtypes).get('item_amounts') == 'array<double>', \
+    "item_amounts must be of type ARRAY<DOUBLE> — got: {}".format(
+        dict(invoices_df.dtypes).get('item_amounts')
+    )
+
+# Calculate total invoice amount across line items.
+# F.sum() is a cross-row aggregate and cannot accept ARRAY<DOUBLE>.
+# F.aggregate() is the correct Spark 3.x function for folding array elements
+# into a per-row scalar value.
 processed_invoices = invoices_df.withColumn(
     "total_invoice_amount",
-    F.sum(F.col("item_amounts"))
+    F.aggregate(
+        F.col("item_amounts"),
+        F.lit(0.0).cast(DoubleType()),
+        lambda acc, x: acc + x
+    )
 )
+
+# Confirm output schema: total_invoice_amount must resolve to DoubleType, not ArrayType
+invoices_df.printSchema()
+processed_invoices.printSchema()
 
 # Process invoice dataset
 processed_invoices.collect()
