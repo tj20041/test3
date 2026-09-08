@@ -28,10 +28,21 @@ data = [
 
 invoices_df = spark.createDataFrame(data, schema)
 
-# Calculate total invoice amount across line items
+# Validate that item_amounts column is of the expected array<double> type before transformation
+assert dict(invoices_df.dtypes).get("item_amounts") == "array<double>", \
+    "Schema mismatch: item_amounts must be array<double>"
+
+# Calculate total invoice amount across line items using F.aggregate() to
+# perform an element-wise sum over the array within each row.
+# F.sum() is a row-wise aggregation function for scalar numeric columns and
+# cannot reduce elements within an ARRAY<DOUBLE> column — use F.aggregate() instead.
 processed_invoices = invoices_df.withColumn(
     "total_invoice_amount",
-    F.sum(F.col("item_amounts"))
+    F.aggregate(
+        F.col("item_amounts"),
+        F.lit(0.0).cast(DoubleType()),
+        lambda acc, x: acc + x
+    )
 )
 
 # Process invoice dataset
