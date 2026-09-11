@@ -1,4 +1,5 @@
 import sys
+import logging
 from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
@@ -7,6 +8,9 @@ from awsglue.job import Job
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType, ArrayType, DoubleType
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 args = getResolvedOptions(sys.argv, ['JOB_NAME'])
 sc = SparkContext()
@@ -28,13 +32,35 @@ data = [
 
 invoices_df = spark.createDataFrame(data, schema)
 
-# Calculate total invoice amount across line items
-processed_invoices = invoices_df.withColumn(
-    "total_invoice_amount",
-    F.sum(F.col("item_amounts"))
-)
+try:
+    # Calculate total invoice amount across line items.
+    # NOTE: pyspark.sql.functions.sum is a row-aggregation function and cannot
+    # operate on an ArrayType column. To sum the elements *within* each row's
+    # array we must use the higher-order SQL function `aggregate`, invoked via
+    # F.expr, which reduces the array to a single scalar DoubleType value per row.
+    processed_invoices = invoices_df.withColumn(
+        "total_invoice_amount",
+        F.expr("aggregate(item_amounts, CAST(0 AS DOUBLE), (acc, x) -> acc + x)")
+    )
 
-# Process invoice dataset
-processed_invoices.collect()
+    # Defensive schema check to catch type-mismatch regressions early, before
+    # the action below forces plan evaluation.
+    processed_invoices.printSchema()
 
-job.commit()
+    # Force evaluation and surface the computed totals for diagnostics/logging.
+    # (Kept as collect() per existing behaviour; replace with an explicit
+    # write_dynamic_frame sink if this job needs to persist results downstream.)
+    results = processed_invoices.collect()
+    for row in results:
+        logger.info(
+            "Processed invoice_id=%s total_invoice_amount=%s",
+            row["invoice_id"],
+            row["total_invoice_amount"],
+        )
+
+    job.commit()
+except Exception:
+    logger.error("Glue job failed while computing total_invoice_amount.", exc_info=True)
+    logger.error("invoices_df schema:")
+    invoices_df.printSchema()
+    raise
